@@ -1,0 +1,217 @@
+Here is the complete Python code that replicates the Net Present Value (NPV) / Mark-to-Market (MtM) calculation using continuous discounting and a market discount curve. I've included step-by-step explanations after the code.
+---------------------
+
+Explanation Summary
+Step	Description
+1	Create a DiscountCurve object to hold and interpolate discount factors based on day count
+2	Define a function to compute MtM = PV of interest + PV of principal
+3	Input the discount curve data manually or from file (realistic LIBOR DF values)
+4	Set trade terms (e.g., notional, rate, schedule)
+5	Use the interpolator to get discount factors and calculate MtM
+6	Output the MtM for comparison against benchmarks like SUMMIT or FARM
+
+----------------------------------------
+import pandas as pd
+from scipy.interpolate import interp1d
+import numpy as np
+
+# Step 1: Define the DiscountCurve class
+class DiscountCurve:
+    def __init__(self, curve_df: pd.DataFrame, currency: str):
+        """
+        Initializes a discount curve for a specific currency.
+        The curve is interpolated so that we can get the discount factor for any day.
+        """
+        df = curve_df[curve_df['Currency'] == currency].copy()
+        df.reset_index(drop=True, inplace=True)
+        self.interpolator = interp1d(df['Days'], df['DF'], kind='linear', fill_value='extrapolate')
+
+    def get_df(self, days: float) -> float:
+        """
+        Returns the interpolated discount factor for a given number of days.
+        """
+        return float(self.interpolator(days))
+
+
+# Step 2: Function to compute MtM value using the discount curve
+def calculate_mtm(P, k, n_j, d_j, B, d, discount_curve: DiscountCurve):
+    """
+    Calculates the Mark-to-Market (MtM) value of a trade.
+
+    Parameters:
+    - P: Principal (notional amount)
+    - k: Fixed interest rate
+    - n_j: list of number of days in each interest period
+    - d_j: list of days from interest date to valuation date
+    - B: day count basis (360 or 365)
+    - d: days from principal settlement to valuation date
+    - discount_curve: DiscountCurve object to provide discount factors
+
+    Returns:
+    - MtM value (float)
+    """
+    m = len(n_j)
+
+    # Step 2a: Compute present value of each interest payment
+    interest_pv = sum([
+        discount_curve.get_df(d_j[j]) * (P * k * n_j[j] / B)
+        for j in range(m)
+    ])
+
+    # Step 2b: Compute present value of principal repayment
+    principal_pv = P * discount_curve.get_df(d)
+
+    # Step 2c: Add both together to get total MtM
+    return interest_pv + principal_pv
+
+
+# Step 3: Simulate a sample discount curve for USD (from your screenshots)
+curve_data = {
+    'Index': ['LIBOR'] * 5,
+    'Currency': ['USD'] * 5,
+    'Date': pd.to_datetime(['2025-04-01', '2025-07-01', '2026-01-01', '2026-07-01', '2027-01-01']),
+    'Days': [4, 95, 280, 460, 640],
+    'Rate': [4.91, 4.89, 4.45, 4.13, 3.98],  # For reference only, not used in calculation
+    'DF': [0.99946, 0.98735, 0.96732, 0.94915, 0.91464]
+}
+curve_df = pd.DataFrame(curve_data)
+
+# Step 4: Define trade parameters
+P = 1_000_000        # Principal (notional) amount
+k = 0.05             # Fixed interest rate (5%)
+n_j = [90, 90, 90, 90]       # Interest periods in days
+d_j = [270, 180, 90, 0]      # Days to valuation date from each interest period
+B = 360              # Day count basis
+d = 365              # Days from principal settlement to valuation date
+
+# Step 5: Run calculation
+usd_curve = DiscountCurve(curve_df, 'USD')
+mtm_value = calculate_mtm(P, k, n_j, d_j, B, d, usd_curve)
+
+# Step 6: Display the result
+print(f"Calculated MtM Value: ${mtm_value:,.2f}")
+-----------------------------------------------------------------
+
+
+
+import pandas as pd
+
+# Step 1: Load the raw .txt file (assuming it's space-delimited or fixed-width format)
+file_path = 'NYC_20250328_Summit_Curve1.txt'  # Change to your actual path
+
+# Step 2: Read the text lines and skip headers (usually first 2 lines)
+with open(file_path, 'r') as file:
+    lines = file.readlines()
+
+# Remove header lines
+lines = [line.strip() for line in lines if line.strip() and "LIBOR" in line]
+
+# Step 3: Parse lines into structured data
+data = []
+for line in lines:
+    parts = line.split()
+    if len(parts) == 6:
+        data.append({
+            "Index": parts[0],
+            "Currency": parts[1],
+            "Date": parts[2],
+            "Days": int(parts[3]),
+            "Rate": float(parts[4]),
+            "DF": float(parts[5])
+        })
+
+# Step 4: Create DataFrame and export to Excel
+df = pd.DataFrame(data)
+output_excel = 'Summit_Curve_Parsed.xlsx'
+df.to_excel(output_excel, index=False)
+
+print(f"Excel file created: {output_excel}")
+----------------------------------------------------------
+How You Can Use This Curve in Python for Benchmark MtM
+Step 1: Load the Curve
+Assuming you save the file as curve.txt:
+
+python
+Copy
+Edit
+import pandas as pd
+
+# Load curve
+curve = pd.read_csv("curve.txt", delim_whitespace=True, header=None, skiprows=2)
+curve.columns = ['Index', 'Currency', 'Date', 'Days', 'Rate', 'DiscountFactor']
+
+# Optional: convert Date to datetime
+curve['Date'] = pd.to_datetime(curve['Date'], format='%m/%d/%Y')
+Step 2: Create an Interpolation Function
+To get DF for any number of days to maturity:
+
+python
+Copy
+Edit
+from scipy.interpolate import interp1d
+
+# Interpolator: DF as function of days
+interp_df = interp1d(curve['Days'], curve['DiscountFactor'], kind='linear', fill_value='extrapolate')
+Now you can call:
+
+python
+Copy
+Edit
+df_90 = interp_df(90)  # gives the discount factor at 90 days
+Step 3: Plug into MtM Model
+Use the interpolated DF to replace:
+
+python
+Copy
+Edit
+np.exp(-r_j[j] * (d_j[j] / 365))
+With:
+
+python
+Copy
+Edit
+interp_df(d_j[j])
+Same for principal:
+
+python
+Copy
+Edit
+interp_df(d)
+-------------------------------------------
+Example Python Class to Use These Curves
+python
+Copy
+Edit
+import pandas as pd
+from scipy.interpolate import interp1d
+
+class DiscountCurve:
+    def __init__(self, curve_file, currency):
+        self.curve_file = curve_file
+        self.currency = currency
+        self._load_curve()
+
+    def _load_curve(self):
+        df = pd.read_csv(self.curve_file, delim_whitespace=True, header=None, skiprows=2)
+        df.columns = ['Index', 'Currency', 'Date', 'Days', 'Rate', 'DF']
+        df = df[df['Currency'] == self.currency]
+        self.df = df.reset_index(drop=True)
+        self.interpolator = interp1d(df['Days'], df['DF'], kind='linear', fill_value='extrapolate')
+
+    def get_df(self, days):
+        return float(self.interpolator(days))
+Usage
+python
+Copy
+Edit
+# For USD LIBOR
+usd_curve = DiscountCurve('curve_file.txt', 'USD')
+usd_df = usd_curve.get_df(180)  # Get discount factor at 180 days
+
+# For CAD CORRA
+cad_curve = DiscountCurve('curve_file.txt', 'CAD')
+cad_df = cad_curve.get_df(365)
+
+# For EUR EIB1M
+eur_curve = DiscountCurve('curve_file.txt', 'EUR')
+eur_df = eur_curve.get_df(270)
