@@ -1,0 +1,160 @@
+# ===== Model 2612 — minimal notebook implementation for PV (PnL), Equity Delta, and DV01 =====
+# Purpose: price an equity forward/future the "2612 way" and compute PV, Equity Delta, and DV01.
+# Notes:
+# - Rates are assumed CONTINUOUSLY compounded (to match the doc).
+# - Supports flat rates, piecewise curves ([(t_years, rate), ...]), or a callable r(t).
+# - Dividends can be discrete, with separate ex-date (t_ex) and payment date (t_pay).
+
+from dataclasses import dataclass
+from typing import Optional, Iterable, Tuple, Union, Callable
+import math
+
+DAY_COUNT = 365.0  # calendar-day year fraction (doc uses 365)
+
+# ---------- Inputs ----------
+@dataclass
+class Dividend:
+    amount: float          # cash dividend per share / index point
+    t_ex: float            # time to EX-dividend in years from valuation date (may be unused in PV)
+    t_pay: Optional[float] = None  # time to dividend PAYMENT in years (defaults to t_ex if None)
+
+# A "Rate" can come as:
+#  - float: a single flat continuous rate
+#  - iterable of (t_years, rate): piecewise-constant term structure; 'rate' applies up to each 't_years'
+#  - callable: a function r(t) returning the instantaneous rate at time t (we’ll integrate numerically)
+Rate = Union[float, Iterable[Tuple[float, float]], Callable[[float], float]]
+
+# ---------- Helpers ----------
+def _cf(rate: Rate, t0: float, t1: float) -> float:
+    """
+    Capitalization factor CF(t0->t1) = exp( ∫_{t0}^{t1} r(u) du )
+    Used for:
+      - CF_ER(0->T) with the equity-repo curve (to grow spot to forward)
+      - DF_RF(0->T) = exp(-∫ r du) by calling _cf(r, 0, -T)   <-- neat trick: negative upper limit gives discounting
+    """
+    # If asked to go "backwards", we invert the factor:
+    if t1 < t0:
+        return 1.0 / _cf(rate, t1, t0)
+    # No time interval → factor 1
+    if abs(t1 - t0) < 1e-12:
+        return 1.0
+
+    # Flat continuous rate
+    if isinstance(rate, (int, float)):
+        return math.exp(float(rate) * (t1 - t0))
+
+    # Functional curve r(t): integrate numerically (midpoint rule)
+    if callable(rate):
+        steps = max(10, int(200 * (t1 - t0)))  # more steps for longer horizons
+        h = (t1 - t0) / steps
+        acc = 0.0
+        for i in range(steps):
+            acc += rate(t0 + (i + 0.5) * h) * h
+        return math.exp(acc)
+
+    # Piecewise-constant curve: list of (t_end, rate)
+    pts = list(rate)
+    pts.sort(key=lambda x: x[0])  # sort by time
+    acc, prev = 0.0, t0
+    for t_end, r in pts:
+        if t_end <= t0:
+            continue
+        seg_end = min(t1, t_end)        # end of this segment
+        if seg_end > prev:
+            acc += r * (seg_end - prev) # integrate r over this slice
+            prev = seg_end
+        if prev >= t1:
+            break
+    # If the list ends before t1, extend with the last rate
+    if prev < t1:
+        last_r = pts[-1][1] if pts else 0.0
+        acc += last_r * (t1 - prev)
+    return math.exp(acc)
+
+# ---------- Core pricing ----------
+def forward_price_2612(
+    S0: float, T: float, r: Rate, er: Rate, dividends: Optional[Iterable[Dividend]] = None
+) -> float:
+    """
+    2612 theoretical forward price:
+      F = S0 * CF_ER(0->T) - Σ_i [ Div_i * CF_RF(t_pay_i->T) ]
+    - CF_ER uses the equity-repo curve (stock financing).
+    - Dividends are removed as future cash flows discounted from their PAY date to maturity at risk-free.
+    """
+    F = S0 * _cf(er, 0.0, T)  # grow spot to maturity using equity-repo
+    if dividends:
+        for d in dividends:
+            tpay = d.t_pay if d.t_pay is not None else d.t_ex
+            # subtract the future value at T of the dividend cash paid at t_pay:
+            F -= d.amount * _cf(r, tpay, T)  # CF_RF(t_pay -> T)
+    return F
+
+def pv_forward_long(
+    S0: float, K: float, T: float, r: Rate, er: Rate,
+    dividends: Optional[Iterable[Dividend]] = None, Q: float = 1.0, buy_sell: int = 1
+) -> float:
+    """
+    Present value (NPV) of a forward position (this is your "today P&L" vs. zero).
+      PV = sign * Q * (F - K) * DF_RF(0->T)
+    where sign = +1 (long / Buy), -1 (short / Sell), Q = N * multiplier in $/pt.
+    """
+    F  = forward_price_2612(S0, T, r, er, dividends)
+    DF = _cf(r, 0.0, -T)  # discount back from T to today: exp(-∫ r du)
+    return buy_sell * Q * (F - K) * DF
+
+# ---------- Greeks (only the ones you asked for) ----------
+def equity_delta_2612(
+    S0: float, K: float, T: float, r: Rate, er: Rate,
+    dividends: Optional[Iterable[Dividend]] = None, Q: float = 1.0, buy_sell: int = 1,
+    bump_points: float = 1.0, use_bump: bool = True
+) -> float:
+    """
+    Equity Delta ($/index-point).
+    Two options:
+      - bump-and-revalue (doc convention): Δ ≈ [PV(S+ΔS) - PV(S)] / ΔS
+      - analytic (valid because F is linear in S): Δ = sign * Q * CF_ER(0->T) * DF_RF(0->T)
+    """
+    if use_bump:
+        base = pv_forward_long(S0, K, T, r, er, dividends, Q, buy_sell)
+        up   = pv_forward_long(S0 + bump_points, K, T, r, er, dividends, Q, buy_sell)
+        return (up - base) / bump_points
+
+    # Analytic delta (fast, exact for this model)
+    DF    = _cf(r, 0.0, -T)
+    CF_ER = _cf(er, 0.0, T)
+    return buy_sell * Q * CF_ER * DF
+
+def dv01_rf_2612(
+    S0: float, K: float, T: float, r: Rate, er: Rate,
+    dividends: Optional[Iterable[Dividend]] = None, Q: float = 1.0, buy_sell: int = 1,
+    bp: float = 1.0
+) -> float:
+    """
+    DV01 with respect to the RISK-FREE curve: $ change per +1 bp parallel bump to r (repo held fixed).
+    Implemented as bump-and-revalue so it works for flat, piecewise, or callable curves.
+    """
+    base = pv_forward_long(S0, K, T, r, er, dividends, Q, buy_sell)
+    bump = bp / 10000.0  # 1 bp = 0.0001 in rate terms
+
+    # Create a "bumped" version of r with the same type as input
+    if isinstance(r, (int, float)):             # flat
+        r_up = float(r) + bump
+    elif callable(r):                           # functional
+        r_up = lambda t, r=r, bump=bump: r(t) + bump
+    else:                                       # piecewise list
+        r_up = [(ti, ri + bump) for (ti, ri) in r]
+
+    up = pv_forward_long(S0, K, T, r_up, er, dividends, Q, buy_sell)
+    return (up - base) / bp  # return $ per 1 bp
+
+# ---------- (Optional) tiny sanity example ----------
+if __name__ == "__main__":
+    # Index-style sanity test: no discrete divs; set er = r - q
+    S0, K, T = 4800.0, 4820.0, 0.25
+    r, q     = 0.04, 0.012
+    er       = r - q
+    Q        = 150.0
+    print("PV:",               pv_forward_long(S0, K, T, r, er, None, Q))
+    print("Delta (bump):",     equity_delta_2612(S0, K, T, r, er, None, Q))
+    print("Delta (analytic):", equity_delta_2612(S0, K, T, r, er, None, Q, use_bump=False))
+    print("DV01 RF ($/bp):",   dv01_rf_2612(S0, K, T, r, er, None, Q))
