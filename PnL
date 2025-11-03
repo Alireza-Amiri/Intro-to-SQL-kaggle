@@ -1,90 +1,132 @@
-import numpy as np
-import pandas as pd
+Wash Trading V2 – Validation Summary
+1. Objective
 
-def _linear_extrapolate(x, y, x_new):
-    """
-    Interpolate linearly within [x_min, x_max] and extrapolate linearly
-    outside that range using the end slopes.
-    x: 1D array (monotonic)
-    y: 1D array (same length as x)
-    x_new: 1D array of target x's
-    returns: y_new aligned to x_new
-    """
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    x_new = np.asarray(x_new, dtype=float)
+The purpose of the Wash Trading V2 model is to identify trading patterns that artificially create the appearance of market activity without genuine market risk or economic intent. The alert metric is designed to capture transactions that generate offsetting positions—often between the same or related instruments—executed in close succession and sometimes by prior mutual agreement.
+These patterns may mislead the market by inflating liquidity, manipulating prices, or disguising monetary transfers between parties, while producing minimal or no real market exposure.
 
-    # ensure sorted by x
-    order = np.argsort(x)
-    x, y = x[order], y[order]
+2. Working Example
 
-    # interior interpolation
-    y_new = np.interp(x_new, x, y)
+Consider a simplified scenario:
 
-    # left extrapolation (x_new < x0)
-    left_mask = x_new < x[0]
-    if np.any(left_mask) and len(x) >= 2:
-        slope_left = (y[1] - y[0]) / (x[1] - x[0])
-        y_new[left_mask] = y[0] + (x_new[left_mask] - x[0]) * slope_left
+Counterparty A buys 10 shares of Security X from Counterparty B at $1,000.
 
-    # right extrapolation (x_new > xN)
-    right_mask = x_new > x[-1]
-    if np.any(right_mask) and len(x) >= 2:
-        slope_right = (y[-1] - y[-2]) / (x[-1] - x[-2])
-        y_new[right_mask] = y[-1] + (x_new[right_mask] - x[-1]) * slope_right
+Shortly thereafter, A sells the same 10 shares back to B at $1,010.
+The apparent profit/loss is negligible, and market risk is minimal.
+However, this round-trip activity inflates trading volume and can be used to:
 
-    return y_new
+Feed false signals of market liquidity,
 
-def interpolate_ccar(df, day_col="Days_CCAR", scenario_prefix="CCAR_", targets=None):
-    """
-    df: wide CCAR shock table (like in your screenshot)
-        must contain 'Days_CCAR' and several columns such as 'CCAR_2016_SA', ...
-    targets: list/array of target day tenors to interpolate/extrapolate to.
-             Example: [30, 60, 91, 180, 365, 730, 1095]
-    returns: DataFrame indexed by target days with one column per CCAR scenario
-    """
-    if targets is None:
-        raise ValueError("Provide a list of target day tenors in `targets`.")
+Influence short-term pricing levels, or
 
-    # Make a clean copy and keep numeric day axis
-    work = df.copy()
-    work = work.dropna(subset=[day_col])
-    work[day_col] = pd.to_numeric(work[day_col], errors="coerce")
-    work = work.dropna(subset=[day_col])
+Disguise value transfers (e.g., commission generation or profit shifting).
 
-    # Scenario columns = all that start with 'CCAR_' (adjust if you need another rule)
-    scen_cols = [c for c in work.columns if str(c).upper().startswith(scenario_prefix)]
-    if not scen_cols:
-        raise ValueError("No scenario columns found (e.g., columns starting with 'CCAR_').")
+The Wash Trading V2 metric interprets such behavior as a potential wash trade when the cost of executing the trades (Narrative) significantly exceeds any plausible profit-driven rationale (Counter-Narrative).
 
-    # Prepare output
-    out = pd.DataFrame(index=pd.Index(np.array(targets, dtype=float), name=day_col))
+3. Component Models Used
 
-    x = work[day_col].values
-    for col in scen_cols:
-        y = pd.to_numeric(work[col], errors="coerce").values
-        mask = np.isfinite(x) & np.isfinite(y)
-        if mask.sum() < 2:
-            # Not enough points; fill with NaN
-            out[col] = np.nan
-            continue
-        out[col] = _linear_extrapolate(x[mask], y[mask], out.index.values)
+Wash Trading V2 relies on two key sub-models within ETS:
 
-    return out.sort_index()
+Sub-Model	Purpose
+Market Impact Model V2	Quantifies the transaction cost and market impact of entering/exiting positions for each risk dimension.
+Allocation Algorithm	Pairs offsetting buy/sell trades by instrument, risk exposure, and timing, and determines whether the trade was executed for proprietary (principal) or client-facilitation purposes.
 
-# ------------------ EXAMPLE USE ------------------
-# Suppose your DataFrame is called SOFR_Data_CCAR (from your screenshot)
-# and you want values at standard tenors (days):
-targets = [30, 60, 91, 180, 365, 730, 1095, 1825, 3650]   # 1M, 2M, 3M, 6M, 1Y, 2Y, 3Y, 5Y, 10Y
+Both models are invoked to compute the Narrative (cost side) and Counter-Narrative (genuine-activity side) components that drive the USD Value score.
 
-interp_table = interpolate_ccar(SOFR_Data_CCAR, day_col="Days_CCAR", scenario_prefix="CCAR_", targets=targets)
+4. Inputs and Parameters
 
-# Inspect
-print(interp_table.head(10))
+The model ingests all trade data captured by ETS surveillance systems, including:
 
-# If you only want one scenario, e.g., 'CCAR_2016_SA', you can grab that column:
-ccar_2016_curve = interp_table['CCAR_2016_SA']
-print(ccar_2016_curve)
+Trade date/time, instrument identifier, counterparty, side (buy/sell), and quantity
 
-# Save for use as shocks by tenor
-interp_table.to_excel("CCAR_interpolated_extrapolated_by_days.xlsx")
+Executed price and notional value
+
+Account classification (proprietary vs client)
+
+Derived market-risk sensitivities per trade (e.g., delta, interest-rate, FX)
+
+Core parameters and rules include:
+
+Time-window thresholds for pairing offsetting trades
+
+Risk-dimension mapping (instrument class, currency, curve, or product family)
+
+USD Value score boundaries ensuring:
+
+USD Value ≤ Narrative
+
+Small Counter-Narrative ⇒ USD Value ≈ Narrative (low genuine benefit)
+
+Large Counter-Narrative ⇒ USD Value → 0 (de-prioritized alert)
+
+Calibration parameters are subject to ongoing tuning during metric calibration cycles (Oct–Nov 2025).
+
+5. Algorithm Steps
+Step 1 – Identify Trade Purpose
+
+Apply Allocation Algorithm to classify each trade as either principal or client-facilitating.
+
+Group trades sharing one or more common risk dimensions (e.g., same ISIN or correlated curve exposure).
+
+Step 2 – Calculate Narrative
+
+Compute the cost of trading activity via Market Impact Model V2, estimating the market impact of both entry and exit legs for each risk dimension.
+
+Aggregate across all relevant dimensions to form the Narrative, representing the total cost burden of the suspected wash trade.
+
+Step 3 – Calculate Counter-Narrative
+
+Estimate market-risk exposure and client-facilitation contributions associated with the same trades.
+
+Larger risk exposure or longer position-holding duration → higher Counter-Narrative (indicating genuine activity).
+
+Combine these elements to form the total Counter-Narrative.
+
+Step 4 – Aggregate to Trade Level
+
+Compute USD Value Score = f(Narrative, Counter-Narrative).
+
+High USD Value → costly, uneconomic activity (potential abuse).
+
+Low USD Value → normal facilitation or principal-risk trading.
+
+Step 5 – Multi-Counterparty Variant
+
+Detects extended patterns where a trader coordinates transactions across multiple counterparties to conceal intent.
+
+Reapplies the same logic across all linked entities using common risk identifiers and short-interval matching.
+
+6. MRM Assessment
+Strengths
+
+Economic rationale alignment: The model explicitly contrasts cost (Narrative) versus genuine profitability (Counter-Narrative), consistent with SR 11-7 expectations for conceptual soundness.
+
+Cross-product detection: By analyzing risk sensitivities rather than raw trades, it can detect cross-asset wash activity sharing underlying risk factors.
+
+Modular framework: Reuse of validated ETS components (Allocation Algorithm, Market Impact Model V2) ensures internal consistency and governance traceability.
+
+Scalable design: The metric generalizes across asset classes and supports extension to multi-counterparty scenarios.
+
+Weaknesses / Limitations
+
+Parameter calibration pending: Certain thresholds (USD Value scaling, time-window tolerances) remain under vendor calibration and require post-implementation backtesting.
+
+Data dependency: Accuracy depends heavily on timely and complete ETS data ingestion, including consistent tagging of account roles.
+
+Potential false positives: Legitimate high-volume client facilitation may mimic uneconomic trading without abusive intent.
+
+Opaque cost model: Market Impact Model V2 assumptions (e.g., price-impact elasticity) are vendor-defined and not fully transparent for independent replication.
+
+Governance Recommendations
+
+Conduct sensitivity and stability testing on USD Value outputs under parameter perturbations.
+
+Implement periodic calibration reviews (semi-annual) to confirm Narrative-Counter-Narrative balance remains stable across market regimes.
+
+Require data-quality controls for account-type classification and timestamp alignment.
+
+Document cross-model dependencies formally within the ETS model hierarchy (linkages to Market Impact V2 and Allocation Algorithm).
+
+Establish a benchmarking framework using historical confirmed wash-trade cases to validate alert precision and recall.
+
+----------
+
