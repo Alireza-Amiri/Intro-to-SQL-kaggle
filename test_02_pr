@@ -1,0 +1,278 @@
+Yes. For these haircut tables, your quantitative proxy assessment should test:
+
+“Do the model’s haircut proxies reasonably represent historical stressed losses for different asset classes?”
+
+Step-by-step process
+1. Convert model table into shocks
+
+The table gives new market value %.
+
+Example:
+
+Model Rule	Meaning
+Equity bucket 85% of MV	15% haircut
+Treasury 96% of MV	4% haircut
+Private Label 60% of MV	40% haircut
+Warrant 50% of MV	50% haircut
+
+Formula:
+
+Haircut = 1 - New Market Value %
+2. Select market proxies
+
+Use ETFs/indexes as proxies:
+
+Model Bucket	Proxy
+Broad equities	SPY
+High-vol equities	TSLA / QQQ
+Money Market	BIL or SHV
+Treasuries	IEF / TLT
+Investment Grade Bonds	LQD
+High Yield / lower-rated bonds	HYG
+Structured / Private Label ABS	MBB or CMBS ETF if available
+Warrants	Use high-vol equity proxy or option-like proxy
+3. Download or import daily prices
+
+Use your downloaded Yahoo/Bloomberg prices from Jan 2020 to May 2026.
+
+4. Calculate realized historical drawdowns
+
+For each proxy, calculate:
+
+Metric	Purpose
+Worst 1-day loss	Compare to 1-day model shock
+Worst 3-day loss	Since model mentions severe short-term down move
+Worst 5-day loss	Stress comparison
+95th percentile loss	Severe but less extreme loss
+99th percentile loss	Tail-risk comparison
+5. Compare model haircut vs realized drawdown
+
+Example:
+
+Proxy	Model Haircut	Worst 1D Loss	Worst 5D Loss	Result
+SPY	15%	10.9%	17.4%	Mostly reasonable
+TSLA	50%	21%	34%	Conservative
+HYG	20%	6%	13%	Conservative
+6. Interpret
+
+You are checking whether:
+
+Finding	Meaning
+Model haircut > historical stress loss	Conservative proxy
+Model haircut close to historical stress loss	Reasonable proxy
+Model haircut < historical stress loss	Potential underestimation
+Python code
+import pandas as pd
+import numpy as np
+
+# ============================================================
+# 1. Load price data
+# ============================================================
+# Expected CSV format:
+# Date, SPY, QQQ, TSLA, KO, PG, HYG, TLT, IEF, LQD, BIL, SHV, MBB
+
+file_path = "your_price_data.csv"  # change this
+
+prices = pd.read_csv(file_path)
+prices["Date"] = pd.to_datetime(prices["Date"])
+prices = prices.set_index("Date").sort_index()
+
+# Keep only available columns
+prices = prices.dropna(axis=1, how="all")
+
+# ============================================================
+# 2. Calculate daily simple returns
+# ============================================================
+
+returns = prices.pct_change()
+
+# ============================================================
+# 3. Function to calculate forward multi-day returns
+# ============================================================
+
+def rolling_horizon_return(price_df, horizon):
+    """
+    Calculates horizon-day return.
+    Example: 5-day return = P_t / P_t-5 - 1
+    """
+    return price_df / price_df.shift(horizon) - 1
+
+
+returns_1d = rolling_horizon_return(prices, 1)
+returns_3d = rolling_horizon_return(prices, 3)
+returns_5d = rolling_horizon_return(prices, 5)
+
+# ============================================================
+# 4. Historical stress statistics
+# ============================================================
+
+def stress_stats(return_df):
+    stats = pd.DataFrame(index=return_df.columns)
+
+    stats["Worst Loss"] = return_df.min()
+    stats["95th Percentile Loss"] = return_df.quantile(0.05)
+    stats["99th Percentile Loss"] = return_df.quantile(0.01)
+
+    return stats
+
+stress_1d = stress_stats(returns_1d)
+stress_3d = stress_stats(returns_3d)
+stress_5d = stress_stats(returns_5d)
+
+# ============================================================
+# 5. Define model proxy haircuts
+# ============================================================
+# These are examples based on the model table.
+# Adjust these if your actual table uses different bucket mapping.
+
+model_haircuts = pd.DataFrame({
+    "Model Bucket": [
+        "Equity / Mutual Fund Low Vol",
+        "Equity / Mutual Fund Medium Vol",
+        "Equity / Mutual Fund High Vol",
+        "Money Market",
+        "Private Label / ABS",
+        "VRDN",
+        "Warrant",
+        "Treasury 3-10Y",
+        "Treasury 10-20Y",
+        "Treasury 20Y+",
+        "Investment Grade Corporate",
+        "BBB Corporate",
+        "High Yield Corporate"
+    ],
+    "Proxy Ticker": [
+        "SPY",
+        "QQQ",
+        "TSLA",
+        "BIL",
+        "MBB",
+        "SHV",
+        "TSLA",
+        "IEF",
+        "TLT",
+        "TLT",
+        "LQD",
+        "LQD",
+        "HYG"
+    ],
+    "Model Haircut": [
+        0.15,  # 85% MV
+        0.25,  # 75% MV
+        0.50,  # 50% MV
+        0.02,  # 98% MV
+        0.40,  # 60% MV
+        0.08,  # 92% MV
+        0.50,  # 50% MV
+        0.04,  # 96% MV
+        0.06,  # 94% MV
+        0.09,  # 91% MV
+        0.05,  # example IG corp
+        0.10,  # example BBB corp
+        0.20   # example HY / lower rated
+    ]
+})
+
+# Keep only rows where proxy exists in your data
+model_haircuts = model_haircuts[
+    model_haircuts["Proxy Ticker"].isin(prices.columns)
+].copy()
+
+# ============================================================
+# 6. Compare model haircut to historical drawdowns
+# ============================================================
+
+results = []
+
+for _, row in model_haircuts.iterrows():
+    ticker = row["Proxy Ticker"]
+    haircut = row["Model Haircut"]
+
+    worst_1d = stress_1d.loc[ticker, "Worst Loss"]
+    worst_3d = stress_3d.loc[ticker, "Worst Loss"]
+    worst_5d = stress_5d.loc[ticker, "Worst Loss"]
+
+    p95_1d = stress_1d.loc[ticker, "95th Percentile Loss"]
+    p99_1d = stress_1d.loc[ticker, "99th Percentile Loss"]
+
+    results.append({
+        "Model Bucket": row["Model Bucket"],
+        "Proxy Ticker": ticker,
+        "Model Haircut %": haircut * 100,
+        "Worst 1D Loss %": abs(worst_1d) * 100,
+        "Worst 3D Loss %": abs(worst_3d) * 100,
+        "Worst 5D Loss %": abs(worst_5d) * 100,
+        "1D 95th Percentile Loss %": abs(p95_1d) * 100,
+        "1D 99th Percentile Loss %": abs(p99_1d) * 100,
+        "Cushion vs Worst 1D %": (haircut - abs(worst_1d)) * 100,
+        "Cushion vs Worst 5D %": (haircut - abs(worst_5d)) * 100
+    })
+
+proxy_results = pd.DataFrame(results)
+
+# ============================================================
+# 7. Add assessment flag
+# ============================================================
+
+def assess_proxy(row):
+    if row["Cushion vs Worst 1D %"] >= 0 and row["Cushion vs Worst 5D %"] >= 0:
+        return "Conservative vs historical 1D and 5D drawdowns"
+    elif row["Cushion vs Worst 1D %"] >= 0 and row["Cushion vs Worst 5D %"] < 0:
+        return "Conservative vs 1D, but below worst 5D stress"
+    else:
+        return "Potentially below historical 1D stress"
+
+proxy_results["Assessment"] = proxy_results.apply(assess_proxy, axis=1)
+
+print(proxy_results.round(2))
+
+# ============================================================
+# 8. Export results
+# ============================================================
+
+proxy_results.round(2).to_excel(
+    "proxy_assessment_haircuts_vs_historical_drawdowns.xlsx",
+    index=False
+)
+
+print("Output saved: proxy_assessment_haircuts_vs_historical_drawdowns.xlsx")
+What the code does, simply
+Step 1
+
+Loads your downloaded daily prices.
+
+Step 2
+
+Calculates daily returns.
+
+Step 3
+
+Calculates 1-day, 3-day, and 5-day historical returns.
+
+Step 4
+
+Finds worst historical losses.
+
+Step 5
+
+Creates a table of model haircuts from the model specification.
+
+Step 6
+
+Compares each model haircut to historical drawdowns.
+
+Step 7
+
+Creates an assessment flag:
+
+Result	Meaning
+Conservative	Haircut is larger than historical loss
+Below 5D stress	Haircut covers 1D but not multi-day stress
+Potential issue	Haircut is smaller than worst 1D loss
+Report-ready language
+
+A quantitative proxy assessment was performed to evaluate whether the model’s deterministic haircut assumptions provide reasonable proxies for stressed market losses. Representative market proxies were selected for key asset classes, including broad equities, high-volatility equities, money market instruments, Treasury securities, investment-grade credit, high-yield credit, and structured product exposures. Historical daily price data from January 2020 through May 2026 was used to calculate realized 1-day, 3-day, and 5-day drawdowns. These realized drawdowns were compared against the model’s prescribed haircut assumptions to assess whether the haircuts were conservative, broadly reasonable, or potentially below observed historical stress levels.
+
+Simple conclusion template
+
+The analysis indicated that the model haircuts were generally directionally aligned with historical stress behavior, with higher-risk proxies exhibiting larger realized drawdowns than lower-risk proxies. Certain model haircuts were conservative relative to observed 1-day historical drawdowns, while selected longer-horizon drawdowns exceeded haircut levels for some proxies. This indicates that the haircut framework is broadly relevant as a stress proxy, but remains sensitive to the choice of historical period, proxy instrument, and stress horizon.
