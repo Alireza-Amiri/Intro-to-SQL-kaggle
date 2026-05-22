@@ -1,0 +1,226 @@
+# ============================================================
+# Time Horizon Assessment
+# Test: Is 30-day volatility appropriate for 1-day stress shocks?
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ------------------------------------------------------------
+# STEP 1: Load your price data
+# ------------------------------------------------------------
+# Option A: If you have one CSV with columns:
+# Date, SPY, TSLA, KO, PG, QQQ, HYG, TLT
+
+file_path = "your_price_data.csv"   # <-- change this file name
+
+prices = pd.read_csv(file_path)
+prices["Date"] = pd.to_datetime(prices["Date"])
+prices = prices.set_index("Date")
+prices = prices.sort_index()
+
+# Keep only selected tickers
+tickers = ["SPY", "TSLA", "KO", "PG", "QQQ", "HYG", "TLT"]
+prices = prices[tickers]
+
+# ------------------------------------------------------------
+# STEP 2: Calculate daily log returns
+# ------------------------------------------------------------
+
+returns = np.log(prices / prices.shift(1))
+
+# ------------------------------------------------------------
+# STEP 3: Calculate rolling annualized volatility
+# ------------------------------------------------------------
+# Model uses 30-day volatility:
+# std(log returns over 30 days) * sqrt(252) * 100
+
+vol_30d = returns.rolling(30).std() * np.sqrt(252) * 100
+vol_90d = returns.rolling(90).std() * np.sqrt(252) * 100
+vol_252d = returns.rolling(252).std() * np.sqrt(252) * 100
+
+# ------------------------------------------------------------
+# STEP 4: Define model-style volatility buckets and shocks
+# ------------------------------------------------------------
+
+def assign_equity_shock(vol):
+    if pd.isna(vol):
+        return np.nan
+    elif vol <= 40:
+        return 0.15
+    elif vol <= 70:
+        return 0.25
+    elif vol <= 100:
+        return 0.35
+    else:
+        return 0.50
+
+shock_30d = vol_30d.applymap(assign_equity_shock)
+shock_90d = vol_90d.applymap(assign_equity_shock)
+shock_252d = vol_252d.applymap(assign_equity_shock)
+
+# ------------------------------------------------------------
+# STEP 5: Compare 30-day shock bucket vs longer horizons
+# ------------------------------------------------------------
+
+diff_30_vs_90 = shock_30d.ne(shock_90d)
+diff_30_vs_252 = shock_30d.ne(shock_252d)
+
+summary = pd.DataFrame({
+    "Avg 30D Vol": vol_30d.mean(),
+    "Avg 90D Vol": vol_90d.mean(),
+    "Avg 252D Vol": vol_252d.mean(),
+    "% Days 30D Shock Differs from 90D": diff_30_vs_90.mean() * 100,
+    "% Days 30D Shock Differs from 252D": diff_30_vs_252.mean() * 100,
+    "Max 30D Vol": vol_30d.max(),
+    "Max 252D Vol": vol_252d.max()
+})
+
+print("\nTime Horizon Assessment Summary")
+print(summary.round(2))
+
+# ------------------------------------------------------------
+# STEP 6: Crisis / calm period analysis
+# ------------------------------------------------------------
+
+periods = {
+    "COVID Stress 2020": ("2020-02-15", "2020-06-30"),
+    "Calm / Recovery 2021": ("2021-01-01", "2021-12-31"),
+    "Rate Stress 2022": ("2022-01-01", "2022-12-31"),
+    "Normal / Recent 2023-2026": ("2023-01-01", "2026-05-31")
+}
+
+period_results = []
+
+for period_name, (start, end) in periods.items():
+    temp = vol_30d.loc[start:end]
+    temp_shock = shock_30d.loc[start:end]
+
+    row = {
+        "Period": period_name
+    }
+
+    for ticker in tickers:
+        row[f"{ticker} Avg 30D Vol"] = temp[ticker].mean()
+        row[f"{ticker} Avg Shock"] = temp_shock[ticker].mean()
+
+    period_results.append(row)
+
+period_summary = pd.DataFrame(period_results)
+
+print("\nPeriod-Level Summary")
+print(period_summary.round(2))
+
+# ------------------------------------------------------------
+# STEP 7: Calculate bucket distribution
+# ------------------------------------------------------------
+
+bucket_distribution = {}
+
+for ticker in tickers:
+    bucket_distribution[ticker] = shock_30d[ticker].value_counts(normalize=True).sort_index() * 100
+
+bucket_distribution = pd.DataFrame(bucket_distribution)
+
+bucket_distribution.index = [
+    f"{int(x*100)}% Shock" for x in bucket_distribution.index
+]
+
+print("\n30D Shock Bucket Distribution")
+print(bucket_distribution.round(2))
+
+# ------------------------------------------------------------
+# STEP 8: Plot 30D vs 252D volatility
+# ------------------------------------------------------------
+
+for ticker in tickers:
+    plt.figure(figsize=(10, 5))
+    plt.plot(vol_30d.index, vol_30d[ticker], label="30D Volatility")
+    plt.plot(vol_252d.index, vol_252d[ticker], label="252D Volatility")
+    plt.title(f"{ticker}: 30D vs 252D Annualized Volatility")
+    plt.xlabel("Date")
+    plt.ylabel("Annualized Volatility (%)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+# ------------------------------------------------------------
+# STEP 9: Plot model shock over time
+# ------------------------------------------------------------
+
+for ticker in tickers:
+    plt.figure(figsize=(10, 4))
+    plt.plot(shock_30d.index, shock_30d[ticker] * 100)
+    plt.title(f"{ticker}: Model Shock Based on 30D Volatility")
+    plt.xlabel("Date")
+    plt.ylabel("Applied Shock (%)")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+# ------------------------------------------------------------
+# STEP 10: Export results to Excel
+# ------------------------------------------------------------
+
+with pd.ExcelWriter("time_horizon_assessment_results.xlsx") as writer:
+    summary.round(2).to_excel(writer, sheet_name="Summary")
+    period_summary.round(2).to_excel(writer, sheet_name="Period Summary", index=False)
+    bucket_distribution.round(2).to_excel(writer, sheet_name="Bucket Distribution")
+    vol_30d.round(2).to_excel(writer, sheet_name="30D Vol")
+    vol_90d.round(2).to_excel(writer, sheet_name="90D Vol")
+    vol_252d.round(2).to_excel(writer, sheet_name="252D Vol")
+    shock_30d.round(2).to_excel(writer, sheet_name="30D Shock")
+    shock_252d.round(2).to_excel(writer, sheet_name="252D Shock")
+
+print("\nExcel output created: time_horizon_assessment_results.xlsx")
+
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+Step-by-step explanation
+
+Step 1 — Load price data
+You import daily closing prices for SPY, TSLA, KO, PG, QQQ, HYG, and TLT.
+
+Step 2 — Calculate daily returns
+The code calculates daily log returns:
+
+returns = np.log(prices / prices.shift(1))
+
+This measures daily price movement.
+
+Step 3 — Calculate volatility
+The model uses 30-day volatility. The code also calculates 90-day and 252-day volatility for comparison.
+
+Step 4 — Assign shocks
+The code converts volatility into model-style shocks:
+
+Volatility	Shock
+≤ 40	15%
+40–70	25%
+70–100	35%
+100+	50%
+
+Step 5 — Compare 30-day vs longer windows
+This tells you how often the 30-day volatility assigns a different shock than the 90-day or 252-day window.
+
+Step 6 — Compare market regimes
+You compare COVID stress, 2021 calm period, 2022 rate stress, and recent market period.
+
+Step 7 — Bucket distribution
+This shows how often each security falls into each shock bucket.
+
+Step 8–9 — Charts
+You create:
+
+30D vs 252D volatility chart
+Applied shock over time chart
+
+Step 10 — Export to Excel
+All outputs are exported into an Excel file for your validation workpaper.
+
+Report-ready wording
+
+A quantitative time horizon assessment was performed to evaluate whether the model’s 30-day volatility window is appropriate for assigning one-day down-market stress shocks. Daily price data from January 2020 to May 2026 was analyzed for a representative sample of broad equity, high-volatility equity, low-volatility equity, equity ETF, high-yield bond ETF, and Treasury ETF instruments. Rolling 30-day, 90-day, and 252-day annualized volatility measures were calculated using daily log returns. The resulting volatility measures were mapped to the model’s shock buckets and compared across horizons.
