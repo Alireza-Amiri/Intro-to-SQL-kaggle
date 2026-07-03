@@ -295,3 +295,138 @@ with pd.ExcelWriter("NPO_Sensitivity_Analysis_Output.xlsx") as writer:
     sensitivity_summary.to_excel(writer, sheet_name="Sensitivity Summary", index=False)
 
 print("Done. Output saved as NPO_Sensitivity_Analysis_Output.xlsx")
+
+------------------************  
+
+
+# =========================
+# 9. Financial factor sensitivity
+# =========================
+
+financial_factors_to_shock = [
+    "Total_Cash_Investments",
+    "EFR_Total_Liabilities",
+    "Free_EFR_Operations",
+    "Gifts"
+]
+
+factor_sensitivity_results = []
+
+for factor in financial_factors_to_shock:
+    for shock in shock_levels:
+        shocked_df = df.copy()
+
+        shocked_df[factor] = shocked_df[factor] * (1 + shock)
+
+        shocked_df["Shocked_Rating"] = shocked_df.apply(
+            lambda row: calculate_quant_rating(row, base_weights),
+            axis=1
+        )
+
+        shocked_df["Rating_Change"] = (
+            shocked_df["Shocked_Rating"] - df["Quantitative_Rating"]
+        )
+
+        factor_sensitivity_results.append({
+            "Sensitivity_Type": "Financial Factor Sensitivity",
+            "Factor_Shocked": factor,
+            "Shock": shock,
+            "Average_Absolute_Notch_Change": shocked_df["Rating_Change"].abs().mean(),
+            "Max_Notch_Change": shocked_df["Rating_Change"].abs().max(),
+            "Percent_Unchanged": (shocked_df["Rating_Change"] == 0).mean(),
+            "Percent_Moved_1_Notch": (shocked_df["Rating_Change"].abs() == 1).mean(),
+            "Percent_Moved_2_or_More": (shocked_df["Rating_Change"].abs() >= 2).mean()
+        })
+
+factor_sensitivity_summary = pd.DataFrame(factor_sensitivity_results)
+
+
+# =========================
+# 10. Weight sensitivity
+# =========================
+
+weight_scenarios = {
+    "Base_50_20_20_10": {
+        "Total_Cash_Investments": 0.50,
+        "EFR_Total_Liabilities": 0.20,
+        "Free_EFR_Operations": 0.20,
+        "Gifts": 0.10
+    },
+    "Equal_25_25_25_25": {
+        "Total_Cash_Investments": 0.25,
+        "EFR_Total_Liabilities": 0.25,
+        "Free_EFR_Operations": 0.25,
+        "Gifts": 0.25
+    },
+    "Lower_Cash_40_25_25_10": {
+        "Total_Cash_Investments": 0.40,
+        "EFR_Total_Liabilities": 0.25,
+        "Free_EFR_Operations": 0.25,
+        "Gifts": 0.10
+    },
+    "Higher_Cash_60_15_15_10": {
+        "Total_Cash_Investments": 0.60,
+        "EFR_Total_Liabilities": 0.15,
+        "Free_EFR_Operations": 0.15,
+        "Gifts": 0.10
+    },
+    "No_Gifts_55_225_225_0": {
+        "Total_Cash_Investments": 0.55,
+        "EFR_Total_Liabilities": 0.225,
+        "Free_EFR_Operations": 0.225,
+        "Gifts": 0.00
+    },
+    "Higher_Gifts_45_20_20_15": {
+        "Total_Cash_Investments": 0.45,
+        "EFR_Total_Liabilities": 0.20,
+        "Free_EFR_Operations": 0.20,
+        "Gifts": 0.15
+    }
+}
+
+weight_sensitivity_results = []
+weight_sensitivity_detail = df.copy()
+
+for scenario_name, scenario_weights in weight_scenarios.items():
+    weight_sensitivity_detail[scenario_name] = df.apply(
+        lambda row: calculate_quant_rating(row, scenario_weights),
+        axis=1
+    )
+
+    rating_change = (
+        weight_sensitivity_detail[scenario_name]
+        - df["Quantitative_Rating"]
+    )
+
+    weight_sensitivity_results.append({
+        "Sensitivity_Type": "Weight Sensitivity",
+        "Weight_Scenario": scenario_name,
+        "Cash_Weight": scenario_weights["Total_Cash_Investments"],
+        "EFR_Liabilities_Weight": scenario_weights["EFR_Total_Liabilities"],
+        "Free_EFR_Operations_Weight": scenario_weights["Free_EFR_Operations"],
+        "Gifts_Weight": scenario_weights["Gifts"],
+        "Average_Absolute_Notch_Change": rating_change.abs().mean(),
+        "Max_Notch_Change": rating_change.abs().max(),
+        "Percent_Unchanged": (rating_change == 0).mean(),
+        "Percent_Moved_1_Notch": (rating_change.abs() == 1).mean(),
+        "Percent_Moved_2_or_More": (rating_change.abs() >= 2).mean()
+    })
+
+weight_sensitivity_summary = pd.DataFrame(weight_sensitivity_results)
+
+
+# =========================
+# 11. Export results
+# =========================
+
+with pd.ExcelWriter("NPO_Sensitivity_Analysis_Output.xlsx") as writer:
+    df.to_excel(writer, sheet_name="Base Rating Calculation", index=False)
+    positive_map.to_excel(writer, sheet_name="Positive Mapping", index=False)
+    gift_map.to_excel(writer, sheet_name="Gift Mapping", index=False)
+    raw_sensitivity_summary.to_excel(writer, sheet_name="Raw Input Sensitivity", index=False)
+    factor_sensitivity_summary.to_excel(writer, sheet_name="Factor Sensitivity", index=False)
+    weight_sensitivity_summary.to_excel(writer, sheet_name="Weight Sensitivity", index=False)
+    weight_sensitivity_detail.to_excel(writer, sheet_name="Weight Detail", index=False)
+
+print("Done. Output saved as NPO_Sensitivity_Analysis_Output.xlsx")
+
